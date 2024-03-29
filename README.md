@@ -1,5 +1,5 @@
-# STROBOSCOPIC_DONUT 
-A "simple" stroboscopic donut :doughnut:
+# STROBOSCOPIC_DONUT :coffee::doughnut:
+A "simple" stroboscopic donut 
 
 It's not actually the simplest thing I have implemented ;)
 
