@@ -1,5 +1,5 @@
-# STROBOSCOPIC_DONUT \U+1F369
-A "simple" stroboscopic donut
+# STROBOSCOPIC_DONUT 
+A "simple" stroboscopic donut :doughnut:
 
 It's not actually the simplest thing I have implemented ;)
 
