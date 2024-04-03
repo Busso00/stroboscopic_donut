@@ -2,23 +2,33 @@
 import numpy as np
 import numpy as np
 import scipy
-import struct
 import pyaudiowpatch as pyaudio
 import time
-import librosa
-import time, sys 
+import sys
+import math
 
-from threading import Thread
+from threading import Thread, Semaphore
 
-tick_time = 0 #adjust based on T/2 of screen update
+tick_time = [] #adjust based on T/2 of screen update
 
 FREQ_PRINT = False
 WITH_FFT = False
 
-lag = 16
-threshold = 2.0 #3.3 for all+bass+high #4.5 for high+bass #3.0 for all 
+DIS_BASS = False
+DIS_MID  = True
+DIS_HIGH = False
+
+lag = 200 #2s (>4beat @ 128bpm)
+threshold_bass = 0.0 
+threshold_mid = 0.0 
+threshold_high = 0.0 
+threshold_v = 0.0 
+
 #2.0 hyper low use with block flesh rules
-influence = 0.1
+influence = 1/lag
+
+lock = Semaphore(1)
+
 
 def init(
     x,
@@ -46,16 +56,15 @@ def init(
                 labels=labels)
 
 
-
 def check(
-    result,
+    result_bass,
     single_value,
     threshold
     ):
 
 
-    previous_avg = result['avg']
-    previous_std = result['std']
+    previous_avg = result_bass['avg']
+    previous_std = result_bass['std']
 
     if abs(single_value - previous_avg) > threshold * previous_std:
         if single_value > previous_avg:
@@ -66,9 +75,8 @@ def check(
         return 0
 
 
-
 def add(
-    result,
+    result_bass,
     single_value,
     lag,
     threshold,
@@ -76,11 +84,11 @@ def add(
     ):
 
 
-    previous_avg = result['avg']
-    previous_var = result['var']
-    previous_std = result['std']
-    filtered_y = result['filtered_y'] #avg and stddev on that
-    labels = result['labels']
+    previous_avg = result_bass['avg']
+    previous_var = result_bass['var']
+    previous_std = result_bass['std']
+    filtered_y = result_bass['filtered_y'] #avg and stddev on that
+    labels = result_bass['labels']
 
     if abs(single_value - previous_avg) > threshold * previous_std:
         if single_value > previous_avg:
@@ -98,7 +106,8 @@ def add(
     else:
         labels = np.append(labels, 0)
         filtered_y = np.append(filtered_y, single_value)
-
+    
+    
     # online update formula 
     current_avg_filter = previous_avg + 1. / lag * (filtered_y[-1] - filtered_y[len(filtered_y) - lag - 1])
 
@@ -113,19 +122,16 @@ def add(
      
     current_var_filter = previous_var + 1. / lag * (filtered_y[-1] ** 2 - (filtered_y[len(filtered_y) - 1 - lag]) ** 2) + previous_avg**2 - current_avg_filter**2        
         
-    
+
     # calculate standard deviation for current element as sqrt (current variance)
     current_std_filter = np.sqrt(current_var_filter)
 
     return dict(avg=current_avg_filter, var=current_var_filter,
                 std=current_std_filter, filtered_y=filtered_y[1:],
-                labels=labels)
+                labels=labels[1:])
 
 
-t0 = 0
 
-last_en = np.zeros((lag*4,))
-index = 0
 
 def task():
 
@@ -134,9 +140,11 @@ def task():
 
     RECORD_SECONDS = 0.01
 
-    CUT_POINT_L = 160.0 #160.0 for dynamic
+    #40hz -> 0.0
 
-    CUT_POINT_H = 2560.0 #2000.0 for dynamic
+    CUT_POINT_LL = 80.0
+    CUT_POINT_UL = 120.0
+    CUT_POINT_H = 1600.0 
 
    
     CH = 1
@@ -167,268 +175,123 @@ def task():
         frames_per_buffer = chunk)
 
 
-    lb, la = scipy.signal.butter(8, CUT_POINT_L, fs=float(sampleRate))
+    lb, la = scipy.signal.butter(4, [CUT_POINT_LL, CUT_POINT_UL], fs=float(sampleRate), btype='bandpass')
+    mb, ma = scipy.signal.butter(4, [CUT_POINT_UL,CUT_POINT_H], fs=float(sampleRate), btype='bandpass')
     hb, ha = scipy.signal.butter(8, CUT_POINT_H, fs=float(sampleRate), btype='highpass')
-    mb, ma = scipy.signal.butter(4, [CUT_POINT_L,CUT_POINT_H], fs=float(sampleRate), btype='bandpass')
-
+    
 
 
     def orig_track():
-        global t0
+        global threshold_bass
+        global threshold_mid
+        global threshold_high
+       
         global tick_time
         
-        result = init(np.zeros(lag), lag, threshold=threshold, influence=influence)
+        result_bass = init(np.zeros(lag), lag, threshold=threshold_bass, influence=influence)
+        result_high = init(np.zeros(lag), lag, threshold=threshold_high, influence=influence)
+        
+    
 
-        running_mean = 0.0 #is volume
+        #see it as volume
+        running_mean_bass = 0.0
+        running_mean_mid = 0.0 
+        running_mean_high = 0.0 
+        running_mean = 0.0
         count = 0
+        
+        bpm_bass = 128/4 #fixed change color
+        wait_bass = lag/(lag*RECORD_SECONDS/(60/bpm_bass))
+        penalty_t_bass = wait_bass
 
-        
-        index = 0
-        
-        
+        bpm_high = 128*16
+        wait_high=lag/(lag*RECORD_SECONDS/(60/bpm_high))
+        penalty_t_high = wait_high
 
-        for i in range(int(TOTAL_DURATION*RECORD_SECONDS)): #do this for 10 seconds
+        for _ in range(int(TOTAL_DURATION*RECORD_SECONDS)): #do this for 10 seconds
             
             indata = np.frombuffer(stream.read(chunk), dtype=np.float32)
             
-            t0 = time.perf_counter()
-
+            
             out_bass = scipy.signal.filtfilt(lb, la, indata, axis=0)
             out_high = scipy.signal.filtfilt(hb, ha, indata, axis=0)
             out_mid = scipy.signal.filtfilt(mb, ma, indata, axis=0)
-            #denominator of derivative is constant--> high change --> note
+            #denominator of derivative is constant--> high change --> note  
 
             bass_energy = (out_bass**2).mean()
-            high_energy = (out_high**2).mean()
             mid_energy = (out_mid**2).mean()
-
+            high_energy = (out_high**2).mean()
             
             energy = (indata**2).mean()
 
-            mod_energy = energy+bass_energy+high_energy
 
-            #last_en[index] = mod_energy
-            #index = (index + 1) % (lag*2)
 
             count += 1
-            running_mean += (mod_energy-running_mean)/count
+            running_mean_bass += (bass_energy-running_mean_bass)/count
+            running_mean_mid += (mid_energy-running_mean_mid)/count
+            running_mean_high += (high_energy-running_mean_high)/count
 
-            if FREQ_PRINT:
-                print("\033[1;31m"+min(int(bass_energy*10/running_mean),100)*"*"+"\033[0;0m")
-                print("\033[1;32m"+min(int(mid_energy *10/running_mean),100)*"*"+"\033[0;0m")
-                print("\033[1;33m"+min(int(high_energy*10/running_mean),100)*"*"+"\033[0;0m")
-            
-
-            ck = check(result, float(mod_energy), threshold=threshold) 
-            #just check if taken add higher value, if not add itself
-            
-           
-            strobo_active = False
-            
-            if mod_energy > 0: #make goog smoothing in general
-                strobo_active = True
-                bass_s = int(-lag//2)
-                mid_s = int(-lag//2)
-                high_s = int(-lag//2)
-            
-            #lag*0.01 = 0.16 
-            #@128 bpm approx 2bs 1b/0.5s --> 8 time division 0.6125
-            #bass at @ > td/2 -> 0.25, mid and high @ > td/4
-
-            Me = max(bass_energy*2, mid_energy, high_energy*2)
+            running_mean += (energy-running_mean)/count
 
             
-
-            if strobo_active:
+            if wait_bass > 0:
+                #sinusoidal penalty
+                penalty_bass = 16*np.abs(np.cos(penalty_t_bass/wait_bass*math.pi)) #penalty at start is max -> 0 -> max
+                threshold_bass = penalty_bass
+            
+            if wait_high > 0:
                 
-                past_bass = result["labels"][bass_s:-1][result["labels"][bass_s:-1] == 1]
-                past_mid = result["labels"][mid_s:-1][result["labels"][mid_s:-1] == 2]
-                past_high = result["labels"][high_s:-1][result["labels"][high_s:-1] == 3]
+                threshold_high = 2.0
 
+            
+            if True:
                 
-                flash = (past_bass.shape[0] == 0 and bass_energy*2 == Me) or ( past_mid.shape[0] == 0 and mid_energy == Me) or (past_high.shape[0] == 0 and high_energy*2 == Me) 
-                flash = flash and np.count_nonzero(result["labels"][-3:-1] > 0) == 0
-
-            else:
-
-                flash = False
-
-            if (ck > 0) and flash and strobo_active: #for strobo light only if volume is high are active
-                #artificial peak
-                #between 5*10**7 - 2*10**8 and
-                result = add(result, float(mod_energy*5*10**7), lag=lag, threshold=threshold, influence=influence)
-
                 
+                lock.acquire()
+            
+                result_bass = add(result_bass, float(bass_energy+high_energy), lag=lag, threshold=threshold_bass, influence=influence)
+                result_high = add(result_high, float(energy), lag=lag, threshold=threshold_high, influence=influence)
+                
+                ck_bass = result_bass["labels"][-1]
+                ck_high = result_high["labels"][-1] and energy > running_mean*1.5
 
-                if not FREQ_PRINT: #don't update tick to not make other process print
+
+                flash_bass = ck_bass and not DIS_BASS
+                flash_high = ck_high and not DIS_HIGH
+
+                if flash_bass:
+                    tick_time.append(1)
+                    penalty_t_bass = wait_bass
+                else:
+                    penalty_t_bass -= 0.5
+                    if penalty_t_bass <= 0:
+                        penalty_t_bass = wait_bass
+
+
+                if flash_high:
+                    tick_time.append(4)
+                    penalty_t_high = wait_high
                     
+                else:
+                    penalty_t_high -= 0.5
+                    if penalty_t_high <= 0:
+                        penalty_t_high = wait_high
+
+            
+            
+                
+
+                if FREQ_PRINT:
+                    print("\033[1;31m"+min(int(bass_energy*10/running_mean_bass),100)*"*"+"\033[0;0m")
+                    print("\033[1;32m"+min(int(mid_energy *10/running_mean_mid),100)*"*"+"\033[0;0m")
+                    print("\033[1;33m"+min(int(high_energy*10/running_mean_high),100)*"*"+"\033[0;0m")
+                
                     
-                    if Me == bass_energy*2:
-                        tick_time = 1
-                    elif Me == mid_energy:
-                        tick_time = 2
-                    elif Me == high_energy*2:
-                        tick_time = 3
+                lock.release()
 
                 
-                #if detected multiply input value (want only peaks)
+    
             
-            else:
-                result = add(result, float(mod_energy), lag=lag, threshold=threshold, influence=influence)
-
-
-            if ck > 0:
-
-                
-                if Me == bass_energy*2:
-                    result["labels"][-1] = 1
-                elif Me == mid_energy:
-                    result["labels"][-1] = 2
-                elif Me == high_energy*2:
-                    result["labels"][-1] = 3
-
-               
-                 
-
-                
-    #     
-    #
-    #
-    #
-    #
-    #
-    #
-    #
-    #
-    #
-    #
-    #
-    #
-    #
-    def tempo_track(): #this is slow #fft + other postproccess (do once in a while)
-        
-        print("tempo_track not use")
-        exit(-1)
-
-        global tick_time
-
-        running_mean = 0.0 #for volume
-        count = 0
-
-
-        CB_LEN = 400 #2s buffer for tempo tracking
-        index = 0
-        
-        last = np.zeros((CB_LEN*sampleRate,)) #for online tempo tracking
-
-        took_sliding_window = [] #keep track of already taken
-        last_sliding_window = []
-
-        took2_sliding_window = []
-        last2_sliding_window = []
-
-        sliding_window_size = 10
-        sliding_window_size2 = sliding_window_size//2
-
-        for i in range(int(TOTAL_DURATION*RECORD_SECONDS)):
-            
-            indata = np.frombuffer(stream.read(chunk), dtype=np.float32)
-            
-            
-            out_bass = scipy.signal.filtfilt(lb, la, indata, axis=0)
-            out_high = scipy.signal.filtfilt(hb, ha, indata, axis=0)
-            #out_mid = scipy.signal.filtfilt(mb, ma, indata, axis=0)
-            #denominator of derivative is constant--> high change --> note
-            #bass_norm = np.abs(out_bass).mean()
-            #high_norm = np.abs(out_high).mean()
-            #mid_norm = np.abs(out_mid).mean()
-
-            #print(bass_norm, mid_norm, high_norm)
-            
-            norm = np.abs(indata).mean()
-            
-            norm2 = ((out_bass**2).mean()+(out_high**2).mean())*norm
-
-            count += 1
-            running_mean += (norm-running_mean)/count
-
-            if i % (CB_LEN*50) < CB_LEN: #at least cb_len elements
-                last[index*chunk:(index+1)*chunk] = indata
-            
-            index = (index+1)%CB_LEN
-
-            
-            if i % (CB_LEN*50) == CB_LEN: #at least cb_len elements
-                print("sync")
-                
-                #following ops take a while, do sometimes
-                #prior = scipy.stats.uniform(80, 180) #don't use
-                env = librosa.onset.onset_strength(y=last, sr=float(sampleRate))
-                utempo = librosa.feature.tempo(onset_envelope=env, sr=float(sampleRate), max_tempo=180.0) #regulate length of array (of past beat), BPM
-
-                bps = (utempo/60) #b/s
-                #second every each there is a beat
-                bT = 1/bps
-                sT = RECORD_SECONDS
-                
-
-                #I want to record one entire sliding window without a beat -> sliding_window size is 
-
-                sliding_window_size = int(bT/sT/4) #do "phase locking"
-                sliding_window_size2 = int(bT/sT/8) 
-
-                #i want to estimate 5 with 120 bpm
-
-                print(f"tempo: {utempo}")
-                print(sliding_window_size)
-
-
-            strobo_active = True
-
-            t1 = sum(last_sliding_window)/sliding_window_size*0.6
-            t2 = sum(last2_sliding_window)/sliding_window_size2*0.4
-
-            if t1 > t2:
-                cond = sum(took_sliding_window) == 0
-            else:
-                cond = sum(took2_sliding_window) == 0
-            
-            if strobo_active and cond and norm2 > (t1 + t2)*2:
-                
-                took_sliding_window.append(1)
-                last_sliding_window.append(norm2)
-                
-                took2_sliding_window.append(1)
-                last2_sliding_window.append(norm2)
-
-                tick_time = 1
-            else:
-
-                took_sliding_window.append(0)
-                last_sliding_window.append(norm2)
-
-                took2_sliding_window.append(0)
-                last2_sliding_window.append(norm2)
-
-
-            if (sliding_window_size < len(last_sliding_window)):
-                took_sliding_window = took_sliding_window[len(last_sliding_window)-sliding_window_size:-1]
-                last_sliding_window = last_sliding_window[len(last_sliding_window)-sliding_window_size:-1]
-
-                took2_sliding_window = took2_sliding_window[len(last2_sliding_window)-sliding_window_size:-1]
-                last2_sliding_window = last2_sliding_window[len(last2_sliding_window)-sliding_window_size:-1]
-            else:
-                for i in range(sliding_window_size, len(last_sliding_window)):
-                    
-                    took_sliding_window.append(norm2)
-                    last_sliding_window.append(0.0)
-
-                    if i % 2 ==0:
-                        took2_sliding_window.append(norm2)
-                        last2_sliding_window.append(0.0)
-
-
-    #tempo_track()
     orig_track()
 
     stream.stop_stream()
@@ -439,26 +302,78 @@ def task():
 
 thread = Thread(target=task)
 
-thread.start()
+DONUT = False
+DIFF = False
 
-pos = 0
+ncol = 7
+col = [f"\033[1;3{i}m" for i in range(1,8)]
 
-while True:
-    time.sleep(0.04) #not sufficien sometimes to put process away and run "beat marker"
-    #minimum rate 0.4
-    if tick_time > 0:
-        if not FREQ_PRINT:
-            if tick_time == 1:
-                print("\033[1;31m"+pos*"*"+"\033[0;0m")
-            elif tick_time == 2:
-                print("\033[1;32m"+pos*"*"+"\033[0;0m")
-            elif tick_time == 3:
-                print("\033[1;33m"+pos*"*"+"\033[0;0m")
-        pos = (pos+1)%50
-        tick_time = 0 # process can double run into it beside sleep
 
-    else:
-        print("\033c")
+if __name__=="__main__": #example of usage
+
+    thread.start()
+
+    color = col[0]
+
+    index = 0
+
+    if not DONUT:
+
         
+        while True:
+            time.sleep(0.02) #not sufficien sometimes to put process away and run "beat marker"
+            #minimum rate 0.4
+            lock.acquire()
 
-thread.join()
+            sys.stdout.write(f"\033c") #original color
+            
+
+            if tick_time != []:
+                
+                if not FREQ_PRINT:
+
+                    str_v = []
+
+
+                    
+
+                    if DIFF:
+                        if 1 in tick_time:
+                            str_v.append(16*"\U00002588"+"\033[0;0m\n")
+                        else:
+                            str_v.append("\n")
+
+                        if 2 in tick_time:
+                            str_v.append("\033[1;31m"+16*"\U00002588"+"\033[0;0m\n")
+                        else:
+                            str_v.append("\n")
+
+                        if 3 in tick_time:
+                            str_v.append("\033[1;32m"+16*"\U00002588"+"\033[0;0m\n")
+                        else:
+                            str_v.append("\n")
+                        
+                        if 4 in tick_time:
+                            str_v.append("\033[1;34m"+16*"\U00002588"+"\033[0;0m\n")
+                        else:
+                            str_v.append("\n")
+                    else:
+
+                        if 1 in tick_time:
+                            index = (index+1)%ncol
+                        
+                        if 4 in tick_time:
+                            str_v.append(col[index])
+                            str_v.append(4*"\U00002588"+"\n")
+
+
+                    sys.stdout.write("".join(str_v)) #original color
+
+            tick_time = [] 
+            sys.stdout.flush() 
+            
+            lock.release()
+    else:
+        pass
+
+    thread.join()
