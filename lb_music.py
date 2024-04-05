@@ -7,9 +7,10 @@ import time
 import sys
 import math
 
+from donut import donut, tick_time
+
 from threading import Thread, Semaphore
 
-tick_time = [] #adjust based on T/2 of screen update
 
 FREQ_PRINT = False
 WITH_FFT = False
@@ -55,24 +56,6 @@ def init(
                 std=std_filter[lag - 1], filtered_y=filtered_y,
                 labels=labels)
 
-
-def check(
-    result_bass,
-    single_value,
-    threshold
-    ):
-
-
-    previous_avg = result_bass['avg']
-    previous_std = result_bass['std']
-
-    if abs(single_value - previous_avg) > threshold * previous_std:
-        if single_value > previous_avg:
-            return 1
-        else:
-            return -1
-    else:
-        return 0
 
 
 def add(
@@ -124,7 +107,7 @@ def add(
         
 
     # calculate standard deviation for current element as sqrt (current variance)
-    current_std_filter = np.sqrt(current_var_filter)
+    current_std_filter = np.sqrt(np.abs(current_var_filter))
 
     return dict(avg=current_avg_filter, var=current_var_filter,
                 std=current_std_filter, filtered_y=filtered_y[1:],
@@ -247,7 +230,7 @@ def task():
             if True:
                 
                 
-                lock.acquire()
+                
             
                 result_bass = add(result_bass, float(bass_energy+high_energy), lag=lag, threshold=threshold_bass, influence=influence)
                 result_high = add(result_high, float(energy), lag=lag, threshold=threshold_high, influence=influence)
@@ -260,7 +243,9 @@ def task():
                 flash_high = ck_high and not DIS_HIGH
 
                 if flash_bass:
+                    lock.acquire()
                     tick_time.append(1)
+                    lock.release()
                     penalty_t_bass = wait_bass
                 else:
                     penalty_t_bass -= 0.5
@@ -269,28 +254,16 @@ def task():
 
 
                 if flash_high:
+                    lock.acquire()
                     tick_time.append(4)
-                    penalty_t_high = wait_high
+                    lock.release()
                     
-                else:
-                    penalty_t_high -= 0.5
-                    if penalty_t_high <= 0:
-                        penalty_t_high = wait_high
-
-            
-            
-                
-
                 if FREQ_PRINT:
                     print("\033[1;31m"+min(int(bass_energy*10/running_mean_bass),100)*"*"+"\033[0;0m")
                     print("\033[1;32m"+min(int(mid_energy *10/running_mean_mid),100)*"*"+"\033[0;0m")
                     print("\033[1;33m"+min(int(high_energy*10/running_mean_high),100)*"*"+"\033[0;0m")
                 
                     
-                lock.release()
-
-                
-    
             
     orig_track()
 
@@ -302,7 +275,7 @@ def task():
 
 thread = Thread(target=task)
 
-DONUT = False
+DONUT = True
 DIFF = False
 
 ncol = 7
@@ -371,9 +344,9 @@ if __name__=="__main__": #example of usage
 
             tick_time = [] 
             sys.stdout.flush() 
-            
             lock.release()
     else:
-        pass
+        donut()
+
 
     thread.join()
