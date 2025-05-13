@@ -15,3 +15,17 @@ References:
 - Donut math (only toroid): https://www.a1k0n.net/2011/07/20/donut-math.html 
 - Music tempo detection: https://www.youtube.com/watch?v=FmwpkdcAXl0&list=LL&index=7
 - z-score algorithm: https://github.com/MatteoBattilana/robust-peak-detection-algorithm
+
+Setup code:
+```
+python3 -m venv .venv
+source .venv/bin/activate
+pip install numpy
+pip install scipy
+pip install PyAudioWPatch
+```
+
+Run code in full screen terminal:
+```
+python lb_music.py
+```

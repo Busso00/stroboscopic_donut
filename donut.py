@@ -2,7 +2,6 @@ import numpy as np
 import math
 from time import sleep
 import time, os
-import numpy as np
 from threading import Semaphore
 
 tick_time = []
