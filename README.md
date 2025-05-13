@@ -16,14 +16,28 @@ References:
 - Music tempo detection: https://www.youtube.com/watch?v=FmwpkdcAXl0&list=LL&index=7
 - z-score algorithm: https://github.com/MatteoBattilana/robust-peak-detection-algorithm
 
-Setup code:
+**Use python3.12.3**
+
+Setup code Linux (no stroboscopic effects):
 ```
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install numpy
 pip install scipy
+```
+
+Setup code Windows:
+```
+python -m venv .venv
+.venv/Scripts/activate
+python -m pip install --upgrade pip
+pip install numpy
+pip3 install scipy
 pip install PyAudioWPatch
 ```
+
+
 
 Run code in full screen terminal:
 ```
